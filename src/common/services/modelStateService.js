@@ -62,14 +62,22 @@ class ModelStateService {
         }, {});
 
         const defaultState = {
+            apiUrls: initialApiKeys,
             apiKeys: initialApiKeys,
             selectedModels: { llm: null, stt: null },
         };
         this.state = this.store.get(`users.${userId}`, defaultState);
         console.log(`[ModelStateService] State loaded for user: ${userId}`);
+        console.log(defaultState)
+        console.log(this.state)
+        console.log(this.state.apiKeys)
         for (const p of Object.keys(PROVIDERS)) {
+            console.log(`[ModelStateService] State available for ${p}`);
                 if (!(p in this.state.apiKeys)) {
                     this.state.apiKeys[p] = null;
+                }
+                if (!this.state.apiUrls || !(p in this.state.apiUrls)) {
+                    this.state.apiUrls[p] = null;
                 }
             }
         this._autoSelectAvailableModels();
@@ -85,9 +93,13 @@ class ModelStateService {
         this._logCurrentSelection();
     }
 
-    async validateApiKey(provider, key) {
-        if (!key || key.trim() === '') {
+    async validateApiKey(provider, key, url) {
+        if ((!key || key.trim() === '') && provider !== "gaia") {
             return { success: false, error: 'API key cannot be empty.' };
+        }
+
+        if ((!url || url.trim() === '') && provider === "gaia") {
+            return { success: false, error: 'API url cannot be empty.' };
         }
 
         let validationUrl, headers;
@@ -96,6 +108,10 @@ class ModelStateService {
         switch (provider) {
             case 'openai':
                 validationUrl = 'https://api.openai.com/v1/models';
+                headers = { 'Authorization': `Bearer ${key}` };
+                break;
+            case 'gaia':
+                validationUrl = url.replace(/\/v1\/?$/, '') + '/v1/models';
                 headers = { 'Authorization': `Bearer ${key}` };
                 break;
             case 'gemini':
@@ -126,6 +142,7 @@ class ModelStateService {
                     }
                 
                     console.log(`[ModelStateService] API key for ${provider} is valid.`);
+                    this.setApiUrl(provider, url);
                     this.setApiKey(provider, key);
                     return { success: true };
                 }
@@ -137,6 +154,7 @@ class ModelStateService {
             const response = await fetch(validationUrl, { headers, body });
             if (response.ok) {
                 console.log(`[ModelStateService] API key for ${provider} is valid.`);
+                this.setApiUrl(provider, url);
                 this.setApiKey(provider, key);
                 return { success: true };
             } else {
@@ -169,6 +187,16 @@ class ModelStateService {
         this._logCurrentSelection();
     }
 
+    setApiUrl(provider, key) {
+        if (provider in this.state.apiUrls) {
+            this.state.apiUrls[provider] = key;
+            this._saveState();
+            this._logCurrentSelection();
+            return true;
+        }
+        return false;
+    }
+
     setApiKey(provider, key) {
         if (provider in this.state.apiKeys) {
             this.state.apiKeys[provider] = key;
@@ -193,9 +221,29 @@ class ModelStateService {
         return this.state.apiKeys[provider] || null;
     }
 
+    getApiUrl(provider) {
+        return this.state.apiUrls[provider] || null;
+    }
+
+    getAllApiUrls() {
+        const { 'openai-glass': _, ...displayKeys } = this.state.apiUrls;
+        return displayKeys;
+    }
+
     getAllApiKeys() {
         const { 'openai-glass': _, ...displayKeys } = this.state.apiKeys;
         return displayKeys;
+    }
+
+    removeApiUrl(provider) {
+        if (provider in this.state.apiUrls) {
+            this.state.apiUrls[provider] = null;
+            this._autoSelectAvailableModels();
+            this._saveState();
+            this._logCurrentSelection();
+            return true;
+        }
+        return false;
     }
 
     removeApiKey(provider) {
@@ -206,7 +254,7 @@ class ModelStateService {
 
             const sttProvider = this.getProviderForModel('stt', this.state.selectedModels.stt);
             if (sttProvider === provider) this.state.selectedModels.stt = null;
-            
+
             this._autoSelectAvailableModels();
             this._saveState();
             this._logCurrentSelection();
@@ -279,27 +327,35 @@ class ModelStateService {
      */
     getCurrentModelInfo(type) {
         this._logCurrentSelection();
+        console.log(`[AskService] DB: Current Model info: ${type}`);
+        console.log(`${JSON.stringify(this.state)}`);
         const model = this.state.selectedModels[type];
+        console.log(`[ModelStateService] Getting current model info for type: ${type}, model: ${model}`);
         if (!model) {
-            return null; 
+            return null;
         }
         
         const provider = this.getProviderForModel(type, model);
+        console.log(`[ModelStateService] Getting current model info for type: ${provider}`);
         if (!provider) {
             return null;
         }
 
+        const apiUrl = this.getApiUrl(provider);
         const apiKey = this.getApiKey(provider);
-        return { provider, model, apiKey };
+        return { provider, model, apiUrl, apiKey };
     }
     
     setupIpcHandlers() {
-        ipcMain.handle('model:validate-key', (e, { provider, key }) => this.validateApiKey(provider, key));
+        ipcMain.handle('model:validate-key', (e, { provider, key, url }) => this.validateApiKey(provider, key, url));
+        ipcMain.handle('model:get-all-urls', () => this.getAllApiUrls());
         ipcMain.handle('model:get-all-keys', () => this.getAllApiKeys());
+        ipcMain.handle('model:set-api-url', (e, { provider, key }) => this.setApiUrl(provider, key));
         ipcMain.handle('model:set-api-key', (e, { provider, key }) => this.setApiKey(provider, key));
         ipcMain.handle('model:remove-api-key', (e, { provider }) => {
-            const success = this.removeApiKey(provider);
-            if (success) {
+            const successUrl = this.removeApiUrl(provider);
+            const successKey = this.removeApiKey(provider);
+            if (successUrl && successKey) {
                 const selectedModels = this.getSelectedModels();
                 if (!selectedModels.llm || !selectedModels.stt) {
                     webContents.getAllWebContents().forEach(wc => {

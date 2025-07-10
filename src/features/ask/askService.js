@@ -41,6 +41,7 @@ async function sendMessage(userPrompt) {
         // --- End of user message saving ---
 
         const modelInfo = await getCurrentModelInfo(null, { type: 'llm' });
+        console.log(`[AskService] Model info: ${JSON.stringify(modelInfo)}`);
         if (!modelInfo || !modelInfo.apiKey) {
             throw new Error('AI model or API key not configured.');
         }
@@ -71,8 +72,11 @@ async function sendMessage(userPrompt) {
                 image_url: { url: `data:image/jpeg;base64,${screenshotBase64}` },
             });
         }
+
+        console.log(messages)
         
         const streamingLLM = createStreamingLLM(modelInfo.provider, {
+            apiUrl: modelInfo.apiUrl,
             apiKey: modelInfo.apiKey,
             model: modelInfo.model,
             temperature: 0.7,
@@ -84,53 +88,55 @@ async function sendMessage(userPrompt) {
         const response = await streamingLLM.streamChat(messages);
 
         // --- Stream Processing ---
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
+        // 兼容 Node.js ReadableStream
         let fullResponse = '';
-
         const askWin = windowPool.get('ask');
         if (!askWin || askWin.isDestroyed()) {
             console.error("[AskService] Ask window is not available to send stream to.");
-            reader.cancel();
+            if (response.body && typeof response.body.destroy === 'function') {
+                response.body.destroy();
+            }
             return;
         }
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+        const decoder = new TextDecoder();
 
-            const chunk = decoder.decode(value);
-            const lines = chunk.split('\n').filter(line => line.trim() !== '');
+        // Node.js ReadableStream 处理
+        try {
+            for await (const chunk of response.body) {
+                const chunkStr = typeof chunk === 'string' ? chunk : decoder.decode(chunk);
+                const lines = chunkStr.split('\n').filter(line => line.trim() !== '');
 
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const data = line.substring(6);
-                    if (data === '[DONE]') {
-                        askWin.webContents.send('ask-response-stream-end');
-                        
-                        // Save assistant's message to DB
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        const data = line.substring(6);
+                        if (data === '[DONE]') {
+                            askWin.webContents.send('ask-response-stream-end');
+                            // Save assistant's message to DB
+                            try {
+                                await askRepository.addAiMessage({ sessionId, role: 'assistant', content: fullResponse });
+                                console.log(`[AskService] DB: Saved assistant response to session ${sessionId}`);
+                            } catch(dbError) {
+                                console.error("[AskService] DB: Failed to save assistant response:", dbError);
+                            }
+                            return { success: true, response: fullResponse };
+                        }
                         try {
-                            // sessionId is already available from when we saved the user prompt
-                            await askRepository.addAiMessage({ sessionId, role: 'assistant', content: fullResponse });
-                            console.log(`[AskService] DB: Saved assistant response to session ${sessionId}`);
-                        } catch(dbError) {
-                            console.error("[AskService] DB: Failed to save assistant response:", dbError);
+                            const json = JSON.parse(data);
+                            const token = json.choices[0]?.delta?.content || '';
+                            if (token) {
+                                fullResponse += token;
+                                askWin.webContents.send('ask-response-chunk', { token });
+                            }
+                        } catch (error) {
+                            // Ignore parsing errors for now
                         }
-                        
-                        return { success: true, response: fullResponse };
-                    }
-                    try {
-                        const json = JSON.parse(data);
-                        const token = json.choices[0]?.delta?.content || '';
-                        if (token) {
-                            fullResponse += token;
-                            askWin.webContents.send('ask-response-chunk', { token });
-                        }
-                    } catch (error) {
-                        // Ignore parsing errors for now
                     }
                 }
             }
+        } catch (streamErr) {
+            console.error('[AskService] Stream error:', streamErr);
+            return { success: false, error: streamErr.message };
         }
     } catch (error) {
         console.error('[AskService] Error processing message:', error);

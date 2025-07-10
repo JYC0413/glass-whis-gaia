@@ -446,6 +446,7 @@ export class SettingsView extends LitElement {
         isContentProtectionOn: { type: Boolean, state: true },
         saving: { type: Boolean, state: true },
         providerConfig: { type: Object, state: true },
+        apiUrls: { type: Object, state: true },
         apiKeys: { type: Object, state: true },
         availableLlmModels: { type: Array, state: true },
         availableSttModels: { type: Array, state: true },
@@ -466,7 +467,8 @@ export class SettingsView extends LitElement {
         //////// after_modelStateService ////////
         this.shortcuts = {};
         this.firebaseUser = null;
-        this.apiKeys = { openai: '', gemini: '', anthropic: '' };
+        this.apiUrls = { gaia: '' };
+        this.apiKeys = { openai: '', gaia: '', gemini: '', anthropic: '' };
         this.providerConfig = {};
         this.isLoading = true;
         this.isContentProtectionOn = true;
@@ -529,9 +531,10 @@ export class SettingsView extends LitElement {
         this.isLoading = true;
         const { ipcRenderer } = window.require('electron');
         try {
-            const [userState, config, storedKeys, availableLlm, availableStt, selectedModels, presets, contentProtection, shortcuts] = await Promise.all([
+            const [userState, config, storedUrls, storedKeys, availableLlm, availableStt, selectedModels, presets, contentProtection, shortcuts] = await Promise.all([
                 ipcRenderer.invoke('get-current-user'),
                 ipcRenderer.invoke('model:get-provider-config'), // Provider 설정 로드
+                ipcRenderer.invoke('model:get-all-urls'),
                 ipcRenderer.invoke('model:get-all-keys'),
                 ipcRenderer.invoke('model:get-available-models', { type: 'llm' }),
                 ipcRenderer.invoke('model:get-available-models', { type: 'stt' }),
@@ -543,6 +546,7 @@ export class SettingsView extends LitElement {
             
             if (userState && userState.isLoggedIn) this.firebaseUser = userState;
             this.providerConfig = config;
+            this.apiUrls = storedUrls;
             this.apiKeys = storedKeys;
             this.availableLlmModels = availableLlm;
             this.availableSttModels = availableStt;

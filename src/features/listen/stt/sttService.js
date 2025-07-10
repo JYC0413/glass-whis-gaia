@@ -26,6 +26,13 @@ class SttService {
         this.onStatusUpdate = null;
 
         this.modelInfo = null; 
+
+        // 新增音频缓冲和定时器
+        this.myAudioBuffer = [];
+        this.myAudioTimer = null;
+        this.theirAudioBuffer = [];
+        this.theirAudioTimer = null;
+        this.AUDIO_SEND_INTERVAL = 5000; // 5秒
     }
 
     setCallbacks({ onTranscriptionComplete, onStatusUpdate }) {
@@ -286,8 +293,9 @@ class SttService {
         // const authService = require('../../../common/services/authService');
         // const userState = authService.getCurrentUser();
         // const loggedIn = userState.isLoggedIn;
-        
+        console.log("[SttService] Initializing STT sessions with model info:", this.modelInfo);
         const sttOptions = {
+            apiUrl: this.modelInfo.apiUrls,
             apiKey: this.modelInfo.apiKey,
             language: effectiveLanguage,
             usePortkey: this.modelInfo.provider === 'openai-glass',
@@ -299,8 +307,70 @@ class SttService {
             createSTT(this.modelInfo.provider, { ...sttOptions, callbacks: theirSttConfig.callbacks }),
         ]);
 
+        // 调试输出，确认 session 对象结构
+        console.log('mySttSession:', this.mySttSession);
+        console.log('theirSttSession:', this.theirSttSession);
+
+        // 检查 sendRealtimeInput 方法是否存在
+        if (
+            ['gaia'].includes(this.modelInfo.provider)
+        ) {
+            // whisper/gaia 不需要 sendRealtimeInput 检查
+        } else if (
+            typeof this.mySttSession?.sendRealtimeInput !== 'function' ||
+            typeof this.theirSttSession?.sendRealtimeInput !== 'function'
+        ) {
+            throw new Error(
+                '[SttService] STT session does not implement sendRealtimeInput. ' +
+                'Check your createSTT factory and provider implementation.'
+            );
+        }
+
         console.log('✅ Both STT sessions initialized successfully.');
         return true;
+    }
+
+    // 新增：PCM转WAV工具
+    pcmToWav(pcmBuffer, options = {}) {
+        const numChannels = options.numChannels || 1;
+        const sampleRate = options.sampleRate || 24000;
+        const bitDepth = options.bitDepth || 16;
+        const byteRate = sampleRate * numChannels * bitDepth / 8;
+        const blockAlign = numChannels * bitDepth / 8;
+        const wavHeaderSize = 44;
+        const dataSize = pcmBuffer.length;
+        const buffer = Buffer.alloc(wavHeaderSize + dataSize);
+
+        // RIFF identifier
+        buffer.write('RIFF', 0);
+        // file length minus RIFF identifier length and file description length
+        buffer.writeUInt32LE(36 + dataSize, 4);
+        // RIFF type
+        buffer.write('WAVE', 8);
+        // format chunk identifier
+        buffer.write('fmt ', 12);
+        // format chunk length
+        buffer.writeUInt32LE(16, 16);
+        // sample format (raw)
+        buffer.writeUInt16LE(1, 20);
+        // channel count
+        buffer.writeUInt16LE(numChannels, 22);
+        // sample rate
+        buffer.writeUInt32LE(sampleRate, 24);
+        // byte rate (sample rate * block align)
+        buffer.writeUInt32LE(byteRate, 28);
+        // block align (channel count * bytes per sample)
+        buffer.writeUInt16LE(blockAlign, 32);
+        // bits per sample
+        buffer.writeUInt16LE(bitDepth, 34);
+        // data chunk identifier
+        buffer.write('data', 36);
+        // data chunk length
+        buffer.writeUInt32LE(dataSize, 40);
+        // PCM data
+        pcmBuffer.copy(buffer, 44);
+
+        return buffer;
     }
 
     async sendAudioContent(data, mimeType) {
@@ -320,11 +390,65 @@ class SttService {
             throw new Error('STT model info could not be retrieved.');
         }
 
-        const payload = modelInfo.provider === 'gemini'
-            ? { audio: { data, mimeType: mimeType || 'audio/pcm;rate=24000' } }
-            : data;
-
-        await this.mySttSession.sendRealtimeInput(payload);
+        // 如果是whisper（gaia），收集音频后一次性发送
+        if (['gaia'].includes(modelInfo.provider)) {
+            const bufferData = Buffer.isBuffer(data)
+                ? data
+                : (typeof data === 'string' ? Buffer.from(data, 'base64') : Buffer.from(data));
+            this.myAudioBuffer.push(bufferData);
+            if (!this.myAudioTimer) {
+                this.myAudioTimer = setTimeout(async () => {
+                    const audioToSend = Buffer.concat(this.myAudioBuffer);
+                    this.myAudioBuffer = [];
+                    this.myAudioTimer = null;
+                    if (audioToSend.length > 0) {
+                        try {
+                            // 封装为WAV格式
+                            const wavBuffer = this.pcmToWav(audioToSend, { numChannels: 1, sampleRate: 24000, bitDepth: 16 });
+                            if (typeof this.mySttSession.transcribeAudio === 'function') {
+                                // 新增：将识别结果赋值到 UI
+                                const result = await this.mySttSession.transcribeAudio(wavBuffer);
+                                if (result && result.text && result.text.trim()) {
+                                    // 回调
+                                    if (this.onTranscriptionComplete) {
+                                        this.onTranscriptionComplete('Me', result.text.trim());
+                                    }
+                                    const cleanText = result.text
+                                        .replace(/\[[^\]]*\]/g, '') // 去除中括号及其内容
+                                        .replace(/\([^\)]*\)/g, '') // 去除小括号及其内容
+                                        .replace(/^\s+|\s+$/g, ''); // 去除首尾空白
+                                    // 通知 UI
+                                    this.sendToRenderer('stt-update', {
+                                        speaker: 'Me',
+                                        text: cleanText.trim(),
+                                        isPartial: false,
+                                        isFinal: true,
+                                        timestamp: Date.now(),
+                                    });
+                                    // 状态更新
+                                    if (this.onStatusUpdate) {
+                                        this.onStatusUpdate('Listening...');
+                                    }
+                                    // 清空缓冲
+                                    this.myCompletionBuffer = '';
+                                    this.myCurrentUtterance = '';
+                                }
+                            } else {
+                                throw new Error('mySttSession.transcribeAudio is not a function');
+                            }
+                        } catch (err) {
+                            console.error('Error sending buffered audio:', err.message);
+                        }
+                    }
+                }, this.AUDIO_SEND_INTERVAL);
+            }
+        } else {
+            // 其他provider保持原实时逻辑
+            const payload = modelInfo.provider === 'gemini'
+                ? { audio: { data, mimeType: mimeType || 'audio/pcm;rate=24000' } }
+                : data;
+            await this.mySttSession.sendRealtimeInput(payload);
+        }
     }
 
     async sendSystemAudioContent(data, mimeType) {
@@ -341,11 +465,65 @@ class SttService {
             throw new Error('STT model info could not be retrieved.');
         }
 
-        const payload = modelInfo.provider === 'gemini'
-            ? { audio: { data, mimeType: mimeType || 'audio/pcm;rate=24000' } }
-            : data;
-        
-        await this.theirSttSession.sendRealtimeInput(payload);
+        // 如果是whisper（gaia），收集音频后一次性发送
+        if (['gaia'].includes(modelInfo.provider)) {
+            const bufferData = Buffer.isBuffer(data)
+                ? data
+                : (typeof data === 'string' ? Buffer.from(data, 'base64') : Buffer.from(data));
+            this.theirAudioBuffer.push(bufferData);
+            if (!this.theirAudioTimer) {
+                this.theirAudioTimer = setTimeout(async () => {
+                    const audioToSend = Buffer.concat(this.theirAudioBuffer);
+                    this.theirAudioBuffer = [];
+                    this.theirAudioTimer = null;
+                    if (audioToSend.length > 0) {
+                        try {
+                            // 封装为WAV格式
+                            const wavBuffer = this.pcmToWav(audioToSend, { numChannels: 1, sampleRate: 24000, bitDepth: 16 });
+                            if (typeof this.theirSttSession.transcribeAudio === 'function') {
+                                // 新增：将识别结果赋值到 UI
+                                const result = await this.theirSttSession.transcribeAudio(wavBuffer);
+                                if (result && result.text && result.text.trim()) {
+                                    // 回调
+                                    if (this.onTranscriptionComplete) {
+                                        this.onTranscriptionComplete('Them', result.text.trim());
+                                    }
+                                    const cleanText = result.text
+                                        .replace(/\[[^\]]*\]/g, '') // 去除中括号及其内容
+                                        .replace(/\([^\)]*\)/g, '') // 去除小括号及其内容
+                                        .replace(/^\s+|\s+$/g, '');
+
+                                    // 通知 UI
+                                    this.sendToRenderer('stt-update', {
+                                        speaker: 'Them',
+                                        text: cleanText.trim(),
+                                        isPartial: false,
+                                        isFinal: true,
+                                        timestamp: Date.now(),
+                                    });
+                                    // 状态更新
+                                    if (this.onStatusUpdate) {
+                                        this.onStatusUpdate('Listening...');
+                                    }
+                                    // 清空缓冲
+                                    this.theirCompletionBuffer = '';
+                                    this.theirCurrentUtterance = '';
+                                }
+                            } else {
+                                throw new Error('theirSttSession.transcribeAudio is not a function');
+                            }
+                        } catch (err) {
+                            console.error('Error sending buffered system audio:', err.message);
+                        }
+                    }
+                }, this.AUDIO_SEND_INTERVAL);
+            }
+        } else {
+            const payload = modelInfo.provider === 'gemini'
+                ? { audio: { data, mimeType: mimeType || 'audio/pcm;rate=24000' } }
+                : data;
+            await this.theirSttSession.sendRealtimeInput(payload);
+        }
     }
 
     killExistingSystemAudioDump() {
@@ -484,6 +662,22 @@ class SttService {
         }
     }
 
+    // Windows 下的系统音频采集（可根据实际采集方式扩展）
+    async startWindowsAudioCapture() {
+        // 这里假设前端会持续推送系统音频数据到 sendSystemAudioContent
+        // 可在此处添加实际的音频采集实现（如 WASAPI/虚拟声卡等），此处仅返回 true
+        if (!this.theirSttSession) {
+            throw new Error('Their STT session not active');
+        }
+        this.onStatusUpdate?.('Windows 系统音频采集已启动');
+        return true;
+    }
+
+    stopWindowsAudioCapture() {
+        // 若有实际采集进程可在此处终止
+        this.onStatusUpdate?.('Windows 系统音频采集已停止');
+    }
+
     isSessionActive() {
         return !!this.mySttSession && !!this.theirSttSession;
     }
@@ -499,6 +693,18 @@ class SttService {
         if (this.theirCompletionTimer) {
             clearTimeout(this.theirCompletionTimer);
             this.theirCompletionTimer = null;
+        }
+
+        // 清理音频缓冲和定时器
+        if (this.myAudioTimer) {
+            clearTimeout(this.myAudioTimer);
+            this.myAudioTimer = null;
+            this.myAudioBuffer = [];
+        }
+        if (this.theirAudioTimer) {
+            clearTimeout(this.theirAudioTimer);
+            this.theirAudioTimer = null;
+            this.theirAudioBuffer = [];
         }
 
         const closePromises = [];
@@ -523,4 +729,4 @@ class SttService {
     }
 }
 
-module.exports = SttService; 
+module.exports = SttService;

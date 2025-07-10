@@ -3,7 +3,9 @@ import { html, css, LitElement } from "../assets/lit-core-2.7.4.min.js"
 export class ApiKeyHeader extends LitElement {
   //////// after_modelStateService ////////
   static properties = {
+    llmApiUrl: { type: String },
     llmApiKey: { type: String },
+    sttApiUrl: { type: String },
     sttApiKey: { type: String },
     llmProvider: { type: String },
     sttProvider: { type: String },
@@ -268,7 +270,9 @@ export class ApiKeyHeader extends LitElement {
     this.errorMessage = ""
     //////// after_modelStateService ////////
     this.llmApiKey = "";
+    this.llmApiUrl = "";
     this.sttApiKey = "";
+    this.sttApiUrl = "";
     this.llmProvider = "openai";
     this.sttProvider = "openai";
     this.providers = { llm: [], stt: [] }; // 초기화
@@ -432,7 +436,7 @@ export class ApiKeyHeader extends LitElement {
   //////// after_modelStateService ////////
   async handleSubmit() {
     console.log('[ApiKeyHeader] handleSubmit: Submitting API keys...');
-    if (this.isLoading || !this.llmApiKey.trim() || !this.sttApiKey.trim()) {
+    if (this.isLoading || (!this.llmApiKey.trim() && this.llmProvider !== 'gaia') || (!this.sttApiKey.trim() && this.sttProvider !== 'gaia') || (!this.llmApiUrl.trim() && this.llmProvider === 'gaia') || (!this.sttApiUrl.trim() && this.sttProvider === 'gaia')) {
         this.errorMessage = "Please enter keys for both LLM and STT.";
         return;
     }
@@ -444,8 +448,8 @@ export class ApiKeyHeader extends LitElement {
     const { ipcRenderer } = window.require('electron');
 
     console.log('[ApiKeyHeader] handleSubmit: Validating LLM key...');
-    const llmValidation = ipcRenderer.invoke('model:validate-key', { provider: this.llmProvider, key: this.llmApiKey.trim() });
-    const sttValidation = ipcRenderer.invoke('model:validate-key', { provider: this.sttProvider, key: this.sttApiKey.trim() });
+    const llmValidation = ipcRenderer.invoke('model:validate-key', { provider: this.llmProvider, key: this.llmApiKey.trim(), url: this.llmApiUrl.trim() });
+    const sttValidation = ipcRenderer.invoke('model:validate-key', { provider: this.sttProvider, key: this.sttApiKey.trim(), url: this.sttApiUrl.trim() });
 
     const [llmResult, sttResult] = await Promise.all([llmValidation, sttValidation]);
 
@@ -512,7 +516,18 @@ export class ApiKeyHeader extends LitElement {
   }
 
   render() {
-    const isButtonDisabled = this.isLoading || !this.llmApiKey.trim() || !this.sttApiKey.trim();
+    const isButtonDisabled = this.isLoading || (!this.llmApiKey.trim() && this.llmProvider !== 'gaia') || (!this.sttApiKey.trim() && this.sttProvider !== 'gaia') || (!this.llmApiUrl.trim() && this.llmProvider === 'gaia') || (!this.sttApiUrl.trim() && this.sttProvider === 'gaia');
+
+    console.log("Rendering ApiKeyHeader with state:", {
+        llmApiKey: this.llmApiKey,
+        sttApiKey: this.sttApiKey,
+        llmProvider: this.llmProvider,
+        sttProvider: this.sttProvider,
+        isLoading: this.isLoading,
+        errorMessage: this.errorMessage,
+        llmApiUrl: this.llmApiUrl,
+        sttApiUrl: this.sttApiUrl
+    })
 
     return html`
         <div class="container" @mousedown=${this.handleMouseDown}>
@@ -524,6 +539,7 @@ export class ApiKeyHeader extends LitElement {
                     <select class="provider-select" .value=${this.llmProvider} @change=${e => this.llmProvider = e.target.value} ?disabled=${this.isLoading}>
                         ${this.providers.llm.map(p => html`<option value=${p.id}>${p.name}</option>`)}
                     </select>
+                    <input type="text" class="api-input" placeholder="LLM Provider API Url" style=${this.llmProvider !== "gaia" ? "display: none;" : "display: block;"} .value=${this.llmApiUrl} @input=${e => this.llmApiUrl = e.target.value} ?disabled=${this.isLoading}>
                     <input type="password" class="api-input" placeholder="LLM Provider API Key" .value=${this.llmApiKey} @input=${e => this.llmApiKey = e.target.value} ?disabled=${this.isLoading}>
                 </div>
 
@@ -532,6 +548,7 @@ export class ApiKeyHeader extends LitElement {
                     <select class="provider-select" .value=${this.sttProvider} @change=${e => this.sttProvider = e.target.value} ?disabled=${this.isLoading}>
                         ${this.providers.stt.map(p => html`<option value=${p.id}>${p.name}</option>`)}
                     </select>
+                    <input type="text" class="api-input" placeholder="STT Provider API Url" style=${this.sttProvider !== "gaia" ? "display: none;" : "display: block;"} .value=${this.sttApiUrl} @input=${e => this.sttApiUrl = e.target.value} ?disabled=${this.isLoading}>
                     <input type="password" class="api-input" placeholder="STT Provider API Key" .value=${this.sttApiKey} @input=${e => this.sttApiKey = e.target.value} ?disabled=${this.isLoading}>
                 </div>
             </div>

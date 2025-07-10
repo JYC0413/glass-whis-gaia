@@ -162,15 +162,24 @@ class ListenService {
         return await this.sttService.sendAudioContent(data, mimeType);
     }
 
-    async startMacOSAudioCapture() {
-        if (process.platform !== 'darwin') {
-            throw new Error('macOS audio capture only available on macOS');
+    // 改为通用方法名
+    async startSystemAudioCapture() {
+        // 支持 Windows 和 macOS
+        if (process.platform === 'win32') {
+            return await this.sttService.startWindowsAudioCapture();
+        } else if (process.platform === 'darwin') {
+            return await this.sttService.startMacOSAudioCapture();
+        } else {
+            throw new Error('系统音频采集仅支持 Windows/macOS');
         }
-        return await this.sttService.startMacOSAudioCapture();
     }
 
-    async stopMacOSAudioCapture() {
-        this.sttService.stopMacOSAudioCapture();
+    async stopSystemAudioCapture() {
+        if (process.platform === 'win32') {
+            this.sttService.stopWindowsAudioCapture();
+        } else if (process.platform === 'darwin') {
+            this.sttService.stopMacOSAudioCapture();
+        }
     }
 
     isSessionActive() {
@@ -255,29 +264,23 @@ class ListenService {
             }
         });
 
-        ipcMain.handle('start-macos-audio', async () => {
-            if (process.platform !== 'darwin') {
-                return { success: false, error: 'macOS audio capture only available on macOS' };
-            }
-            if (this.sttService.isMacOSAudioRunning?.()) {
-                return { success: false, error: 'already_running' };
-            }
-
+        // 新增/替换为通用的系统音频采集 handler
+        ipcMain.handle('start-system-audio', async () => {
             try {
-                const success = await this.startMacOSAudioCapture();
+                const success = await this.startSystemAudioCapture();
                 return { success, error: null };
             } catch (error) {
-                console.error('Error starting macOS audio capture:', error);
+                console.error('Error starting system audio capture:', error);
                 return { success: false, error: error.message };
             }
         });
 
-        ipcMain.handle('stop-macos-audio', async () => {
+        ipcMain.handle('stop-system-audio', async () => {
             try {
-                this.stopMacOSAudioCapture();
+                this.stopSystemAudioCapture();
                 return { success: true };
             } catch (error) {
-                console.error('Error stopping macOS audio capture:', error);
+                console.error('Error stopping system audio capture:', error);
                 return { success: false, error: error.message };
             }
         });

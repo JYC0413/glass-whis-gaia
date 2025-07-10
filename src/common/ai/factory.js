@@ -28,7 +28,16 @@ const PROVIDERS = {
           { id: 'gpt-4o-mini-transcribe', name: 'GPT-4o Mini Transcribe' }
       ],
   },
-
+    'gaia': {
+      name: 'Gaia',
+      handler: () => require("./providers/gaia"),
+      llmModels: [
+          { id: 'gaia', name: 'Gaia' },
+      ],
+      sttModels: [
+          { id: 'gaia', name: 'Gaia' }
+      ],
+  },
   'openai-glass': {
       name: 'OpenAI (Glass)',
       handler: () => require("./providers/openai"),
